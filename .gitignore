@@ -1,0 +1,4 @@
+node_modules/
+rwx-results/
+cypress/screenshots/
+cypress/videos/

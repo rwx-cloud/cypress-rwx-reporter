@@ -1,0 +1,30 @@
+{
+  "name": "@rwx-cloud/cypress-rwx-reporter",
+  "version": "0.1.0",
+  "description": "A Cypress reporter that writes RWX v1 test results.",
+  "main": "index.js",
+  "type": "commonjs",
+  "files": [
+    "index.js",
+    "lib",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "npm run test:unit && npm run test:integration",
+    "test:integration": "node --test test/integration.test.js",
+    "test:unit": "node --test test/reporter.test.js"
+  },
+  "keywords": [
+    "cypress",
+    "reporter",
+    "rwx",
+    "captain"
+  ],
+  "engines": {
+    "node": ">=20.1.0"
+  },
+  "devDependencies": {
+    "cypress": "15.18.0"
+  },
+  "license": "MIT"
+}
