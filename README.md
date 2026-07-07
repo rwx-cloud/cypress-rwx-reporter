@@ -1,11 +1,11 @@
-# cypress-rwx-reporter
+# @rwx-cloud/cypress-rwx-reporter
 
-A Cypress reporter that writes [RWX v1 test results](https://github.com/rwx-research/test-results-schema) for Captain.
+A Cypress reporter that writes [RWX v1 test results](https://github.com/rwx-research/test-results-schema) for use in [RWX](https://rwx.com).
 
 ## Install
 
 ```sh
-npm install --save-dev cypress-rwx-reporter
+npm install --save-dev @rwx-cloud/cypress-rwx-reporter
 ```
 
 ## Configure
@@ -14,7 +14,7 @@ npm install --save-dev cypress-rwx-reporter
 const { defineConfig } = require("cypress");
 
 module.exports = defineConfig({
-  reporter: "cypress-rwx-reporter",
+  reporter: "@rwx-cloud/cypress-rwx-reporter",
   reporterOptions: {
     outputFile: "rwx-results/results-[hash].json",
   },
@@ -25,13 +25,7 @@ The reporter defaults to `rwx-results/results-[hash].json`. Cypress runs each sp
 
 ## Output
 
-The reporter emits RWX v1 JSON with:
-
-- `framework` set to JavaScript Cypress
-- final test results in `test.attempt`
-- earlier retry attempts in `test.pastAttempts`
-- failure screenshots attached as `attempt.meta.fileAttachments`
-- a `attempt.meta.screenshot.image` alias for Captain compatibility
+The reporter emits RWX v1 JSON. Unlike other Cypress reporters, all retry attempts of a test will appear in the test results. Additionally, if Cypress produced screenshots for a failing test, the screenshot path will be attached to the test in `attempt.meta.fileAttachments` and `attempt.meta.screenshot.image`.
 
 Failure screenshots are discovered from Cypress's default screenshot layout:
 
@@ -40,12 +34,12 @@ cypress/screenshots/<spec path>/<suite -- test> (failed).png
 cypress/screenshots/<spec path>/<suite -- test> (failed) (attempt 2).png
 ```
 
-If your Cypress config changes `screenshotsFolder`, pass the same value:
+If your Cypress config changes `screenshotsFolder`, configure the `screenshotsFolder` in `reporterOptions` as well:
 
 ```js
 module.exports = defineConfig({
   screenshotsFolder: "tmp/screenshots",
-  reporter: "cypress-rwx-reporter",
+  reporter: "@rwx-cloud/cypress-rwx-reporter",
   reporterOptions: {
     screenshotsFolder: "tmp/screenshots",
   },

@@ -1,7 +1,9 @@
 {
   "name": "@rwx-cloud/cypress-rwx-reporter",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "description": "A Cypress reporter that writes RWX v1 test results.",
+  "homepage": "https://github.com/rwx-cloud/cypress-rwx-reporter",
+  "repository": "github:rwx-cloud/cypress-rwx-reporter",
   "main": "index.js",
   "type": "commonjs",
   "files": [
