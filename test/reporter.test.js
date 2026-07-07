@@ -165,6 +165,56 @@ test("finds Cypress screenshots when Cypress stores them under the spec basename
   );
 });
 
+test("finds Cypress screenshots truncated with Cypress's filename limit", () => {
+  const projectRoot = tmpdir();
+  const longTitle = "a".repeat(300);
+  const screenshotPath = path.join(
+    projectRoot,
+    "cypress/screenshots/long.cy.js",
+    `${"a".repeat(250)}.png`,
+  );
+  const failing = createMochaTest({
+    titlePath: [longTitle],
+    file: "cypress/e2e/long.cy.js",
+  });
+
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+
+  assert.equal(
+    RwxReporter.findFailureScreenshot(failing, 1, {}, projectRoot),
+    screenshotPath,
+  );
+});
+
+test("prefers Cypress collision filenames for truncated retry screenshots", () => {
+  const projectRoot = tmpdir();
+  const longTitle = "a".repeat(300);
+  const firstScreenshotPath = path.join(
+    projectRoot,
+    "cypress/screenshots/long.cy.js",
+    `${"a".repeat(250)}.png`,
+  );
+  const retryScreenshotPath = path.join(
+    projectRoot,
+    "cypress/screenshots/long.cy.js",
+    `${"a".repeat(246)} (1).png`,
+  );
+  const failing = createMochaTest({
+    titlePath: [longTitle],
+    file: "cypress/e2e/long.cy.js",
+  });
+
+  fs.mkdirSync(path.dirname(firstScreenshotPath), { recursive: true });
+  fs.writeFileSync(firstScreenshotPath, "png");
+  fs.writeFileSync(retryScreenshotPath, "png");
+
+  assert.equal(
+    RwxReporter.findFailureScreenshot(failing, 2, {}, projectRoot),
+    retryScreenshotPath,
+  );
+});
+
 test("attaches failure screenshots to the matching attempt", () => {
   const projectRoot = tmpdir();
   const outputFile = "results/rwx.json";
@@ -221,6 +271,28 @@ test("uses hash output filenames", () => {
 
   assert.equal(entries.length, 1);
   assert.match(entries[0], /^results-[a-f0-9]{32}\.json$/);
+});
+
+test("infers project root from Cypress config", () => {
+  const projectRoot = tmpdir();
+
+  assert.equal(
+    RwxReporter.getProjectRoot({}, { config: { projectRoot } }),
+    projectRoot,
+  );
+});
+
+test("lets reporter options override inferred project root", () => {
+  const projectRoot = tmpdir();
+  const overrideRoot = tmpdir();
+
+  assert.equal(
+    RwxReporter.getProjectRoot(
+      { projectRoot: overrideRoot },
+      { config: { projectRoot } },
+    ),
+    overrideRoot,
+  );
 });
 
 test("handles string reporter options from the Cypress CLI", () => {

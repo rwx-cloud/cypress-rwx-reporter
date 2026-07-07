@@ -56,6 +56,6 @@ module.exports = defineConfig({
 
 - `outputFile`, `resultsFile`, or `rwxFile`: output path. Defaults to `rwx-results/results-[hash].json`.
 - `screenshotsFolder`: Cypress screenshots folder. Defaults to `cypress/screenshots`.
-- `projectRoot`: project root for relative output and screenshot paths. Defaults to `process.cwd()`.
+- `projectRoot`: optional project root override for relative output and screenshot paths. Defaults to Cypress's project root when available, then `process.cwd()`.
 - `includeScreenshots`: set to `false` to skip screenshot lookup.
 - `toConsole`: set to `true` to print the RWX JSON to stdout.

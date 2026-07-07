@@ -1,6 +1,6 @@
 {
   "name": "@rwx-cloud/cypress-rwx-reporter",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A Cypress reporter that writes RWX v1 test results.",
   "main": "index.js",
   "type": "commonjs",
@@ -26,5 +26,8 @@
   "devDependencies": {
     "cypress": "15.18.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "sanitize-filename": "^1.6.3"
+  }
 }
