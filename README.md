@@ -53,4 +53,4 @@ module.exports = defineConfig({
 - `projectRoot`: optional project root override for relative output and screenshot paths. Defaults to Cypress's project root when available, then `process.cwd()`.
 - `includeScreenshots`: set to `false` to skip screenshot lookup.
 - `toConsole`: set to `true` to print the RWX JSON to stdout.
-- `adjustAttempt`: optional filename whose default export function is used to adjust the attempt before it's added. For example, to attach extra files. `module.exports = function adjustAttempt(attempt, test, kind, error, context) {}`
+- `adjustAttemptFile`: optional file whose default export function is used to adjust the attempt before it's added. For example, to attach extra files. `module.exports = function adjustAttempt(attempt, test, kind, error, context) {}`

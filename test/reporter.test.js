@@ -250,7 +250,7 @@ test("attaches failure screenshots to the matching attempt", () => {
   assert.deepEqual(finalAttempt.meta.screenshot, { image: screenshotPath });
 });
 
-test("calls adjustAttempt when it's set", () => {
+test("calls adjustAttemptFile when it's set", () => {
   const projectRoot = tmpdir();
   const outputFile = "results/rwx.json";
   const runner = new EventEmitter();
@@ -259,7 +259,7 @@ test("calls adjustAttempt when it's set", () => {
     file: "cypress/e2e/adjust.cy.js",
   });
 
-  new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot, adjustAttempt: `${__dirname}/fixtures/adjustAttemptMock.js` } });
+  new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot, adjustAttemptFile: `${__dirname}/fixtures/adjustAttemptMock.js` } });
 
   runner.emit("test", failing);
   runner.emit("retry", failing, new Error("failure"));
