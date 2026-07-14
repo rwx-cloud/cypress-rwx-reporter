@@ -250,6 +250,28 @@ test("attaches failure screenshots to the matching attempt", () => {
   assert.deepEqual(finalAttempt.meta.screenshot, { image: screenshotPath });
 });
 
+test("calls adjustAttemptFile when it's set", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["adjust"],
+    file: "cypress/e2e/adjust.cy.js",
+  });
+
+  const adjustAttemptFile = path.relative(projectRoot, `${__dirname}/fixtures/adjustAttemptMock.js`);
+  new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot, adjustAttemptFile } });
+
+  runner.emit("test", failing);
+  runner.emit("retry", failing, new Error("failure"));
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+  const attempt = results.tests[0].attempt;
+
+  assert.equal(attempt.meta.html, 'fromAdjustAttempt-adjust-failed-failure-1');
+});
+
 test("uses hash output filenames", () => {
   const projectRoot = tmpdir();
   const runner = new EventEmitter();
