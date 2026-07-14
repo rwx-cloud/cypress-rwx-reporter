@@ -259,7 +259,8 @@ test("calls adjustAttemptFile when it's set", () => {
     file: "cypress/e2e/adjust.cy.js",
   });
 
-  new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot, adjustAttemptFile: `${__dirname}/fixtures/adjustAttemptMock.js` } });
+  const adjustAttemptFile = path.relative(projectRoot, `${__dirname}/fixtures/adjustAttemptMock.js`);
+  new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot, adjustAttemptFile } });
 
   runner.emit("test", failing);
   runner.emit("retry", failing, new Error("failure"));
