@@ -9,6 +9,7 @@ module.exports = defineConfig({
   },
   reporter: path.resolve(__dirname, "../../..", "index.js"),
   reporterOptions: {
+    attachmentsHook: "rwx-attachments.js",
     outputFile: "rwx-results/results-[hash].json",
   },
   screenshotOnRunFailure: true,

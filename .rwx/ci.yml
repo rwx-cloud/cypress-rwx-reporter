@@ -1,6 +1,10 @@
 on:
   github:
+    pull_request:
+      init:
+        commit-sha: ${{ event.git.sha }}
     push:
+      if: ${{ event.git.branch == 'main' }}
       init:
         commit-sha: ${{ event.git.sha }}
   cli:
@@ -23,29 +27,15 @@ tasks:
     filter:
       - .tool-versions
 
-  - key: node
-    call: nodejs/install 1.1.14
-    with:
-      node-version: ${{ tasks.tool-versions.values.nodejs }}
-
-  - key: node-modules
-    use: [code, node]
-    runner:
-      tmpfs: true
-    run: npm ci
-    filter:
-      - package.json
-      - package-lock.json
-
-  - key: unit-tests
-    use: node-modules
-    run: npm run test:unit
-
-  - key: chrome
-    call: google/install-chrome 2.1.10
-    with:
-      chrome-version: stable
-
-  - key: integration-tests
-    use: [chrome, node-modules]
-    run: npm run test:integration
+  # The lowest Node of every major that package.json's `engines` claims, plus .tool-versions
+  - key: test
+    parallel:
+      matrix:
+        node-version:
+          - "20.1.0"
+          - "22.0.0"
+          - "${{ tasks.tool-versions.values.nodejs }}"
+    call: ${{ run.dir }}/test-node-version.yml
+    init:
+      node-version: ${{ parallel.node-version }}
+      commit-sha: ${{ init.commit-sha }}

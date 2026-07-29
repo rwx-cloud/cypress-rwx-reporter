@@ -244,10 +244,363 @@ test("attaches failure screenshots to the matching attempt", () => {
   const finalAttempt = results.tests[0].attempt;
 
   assert.equal(results.tests[0].pastAttempts[0].meta, undefined);
-  assert.deepEqual(finalAttempt.meta.fileAttachments, [
-    { name: "screenshot", path: screenshotPath },
-  ]);
-  assert.deepEqual(finalAttempt.meta.screenshot, { image: screenshotPath });
+  assert.deepEqual(finalAttempt.meta, {
+    screenshot: { image: screenshotPath },
+  });
+});
+
+function hookFixture(name) {
+  return path.join(__dirname, "fixtures", name);
+}
+
+function screenshotPathFor(projectRoot, spec, baseName) {
+  return path.join(projectRoot, "cypress/screenshots", spec, `${baseName}.png`);
+}
+
+test("invokes the hook for retry, pass, fail, and pending attempts", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const retried = createMochaTest({
+    titlePath: ["retried"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const pending = createMochaTest({
+    titlePath: ["pending"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook.js"),
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", retried);
+  runner.emit("retry", retried, new Error("first failure"));
+  runner.emit("test", retried);
+  runner.emit("pass", retried);
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("test", pending);
+  runner.emit("pending", pending);
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+  const byName = Object.fromEntries(
+    results.tests.map((result) => [result.name, result]),
+  );
+  const hookHtml = (attempt) =>
+    path.basename(attempt.meta.screenshot.html, ".html");
+
+  assert.equal(
+    hookHtml(byName.retried.pastAttempts[0]),
+    "hook-failed-1-error-no-screenshot",
+  );
+  assert.equal(
+    hookHtml(byName.retried.attempt),
+    "hook-successful-2-no-error-no-screenshot",
+  );
+  assert.equal(
+    hookHtml(byName.failing.attempt),
+    "hook-failed-1-error-no-screenshot",
+  );
+  assert.equal(
+    hookHtml(byName.pending.attempt),
+    "hook-skipped-1-no-error-no-screenshot",
+  );
+});
+
+test("resolves a hook path relative to the project root", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const passing = createMochaTest({
+    titlePath: ["passes"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  fs.mkdirSync(path.join(projectRoot, "hooks"), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, "artifacts"), { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, "artifacts/report.html"), "<html>");
+  fs.writeFileSync(
+    path.join(projectRoot, "hooks/attachments.js"),
+    'module.exports = () => ({ screenshot: { html: "artifacts/report.html" } });\n',
+  );
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: "hooks/attachments.js",
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", passing);
+  runner.emit("pass", passing);
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  assert.deepEqual(results.tests[0].attempt.meta.screenshot, {
+    html: path.join(projectRoot, "artifacts/report.html"),
+  });
+});
+
+test("contains a hook that throws", (t) => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const screenshotPath = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/hook.cy.js",
+    "failing (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const passing = createMochaTest({
+    titlePath: ["passing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+  t.mock.method(process.stdout, "write", () => true);
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-throwing.js"),
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("test", passing);
+  runner.emit("pass", passing);
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+  const byName = Object.fromEntries(
+    results.tests.map((result) => [result.name, result]),
+  );
+  const warnings = process.stdout.write.mock.calls.map(
+    (call) => call.arguments[0],
+  );
+
+  // The fixture reads error.message, so it succeeds on the failure and throws
+  // on the pass. The run completes either way and the reporter's own work
+  // survives on both attempts.
+  assert.equal(results.tests.length, 2);
+  assert.equal(byName.failing.attempt.meta.screenshot.image, screenshotPath);
+  assert.equal(byName.passing.attempt.meta, undefined);
+  assert.equal(
+    warnings.filter((warning) => /attachmentsHook threw/.test(warning)).length,
+    1,
+  );
+});
+
+test("stops a hook from mutating the test object", (t) => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["todos", "saves"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  t.mock.method(process.stdout, "write", () => true);
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-mutating.js"),
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+  const warnings = process.stdout.write.mock.calls.map(
+    (call) => call.arguments[0],
+  );
+
+  // The write throws, so the hook is contained and contributes nothing, and
+  // the reporter's view of the test is untouched.
+  assert.equal(failing.title, "saves");
+  assert.equal(results.tests[0].name, "todos saves");
+  assert.deepEqual(results.tests[0].lineage, ["todos", "saves"]);
+  assert.equal(results.tests[0].attempt.meta, undefined);
+  assert.equal(
+    warnings.filter((warning) => /may not modify "title"/.test(warning)).length,
+    1,
+  );
+});
+
+test("keeps the discovered screenshot alongside hook attachments", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const screenshotPath = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/hook.cy.js",
+    "failing (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook.js"),
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  const attempt = readJson(path.join(projectRoot, outputFile)).tests[0].attempt;
+
+  assert.deepEqual(attempt.meta.screenshot, {
+    image: screenshotPath,
+    html: path.join(
+      projectRoot,
+      "artifacts/hook-failed-1-error-screenshot.html",
+    ),
+  });
+});
+
+test("invokes the hook when screenshot discovery is disabled", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const screenshotPath = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/hook.cy.js",
+    "failing (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook.js"),
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  const attempt = readJson(path.join(projectRoot, outputFile)).tests[0].attempt;
+
+  assert.equal(
+    attempt.meta.screenshot.html,
+    path.join(projectRoot, "artifacts/hook-failed-1-error-no-screenshot.html"),
+  );
+  assert.equal(attempt.meta.screenshot.image, undefined);
+});
+
+test("attaches screenshots Cypress finishes writing after the failure event", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const screenshotPath = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/late.cy.js",
+    "late (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["late"],
+    file: "cypress/e2e/late.cy.js",
+  });
+
+  new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot } });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+
+  // Cypress finishes writing the screenshot only after the failure event.
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+
+  runner.emit("end");
+
+  const attempt = readJson(path.join(projectRoot, outputFile)).tests[0].attempt;
+
+  assert.deepEqual(attempt.meta, { screenshot: { image: screenshotPath } });
+});
+
+test("appends a late screenshot to attachments a hook already supplied", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const screenshotPath = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/late.cy.js",
+    "late (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["late"],
+    file: "cypress/e2e/late.cy.js",
+  });
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook.js"),
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+
+  runner.emit("end");
+
+  const attempt = readJson(path.join(projectRoot, outputFile)).tests[0].attempt;
+
+  // The hook only supplied an HTML snapshot, so the back-fill must still run
+  // and must merge rather than replace.
+  assert.deepEqual(attempt.meta.screenshot, {
+    html: path.join(
+      projectRoot,
+      "artifacts/hook-failed-1-error-no-screenshot.html",
+    ),
+    image: screenshotPath,
+  });
 });
 
 test("uses hash output filenames", () => {
@@ -323,4 +676,78 @@ test("handles string reporter options from the Cypress CLI", () => {
   const results = readJson(path.join(projectRoot, outputFile));
 
   assert.equal(results.tests[0].attempt.meta, undefined);
+});
+
+test("prefers a hook screenshot over the one the reporter discovered", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const screenshotPath = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/hook.cy.js",
+    "failing (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-image.js"),
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  const attempt = readJson(path.join(projectRoot, outputFile)).tests[0].attempt;
+
+  assert.deepEqual(attempt.meta.screenshot, {
+    image: path.join(projectRoot, "artifacts/hook-shot.png"),
+  });
+});
+
+test("does not let the end-of-run back-fill replace a hook screenshot", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const screenshotPath = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/late.cy.js",
+    "late (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["late"],
+    file: "cypress/e2e/late.cy.js",
+  });
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-image.js"),
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+
+  // Cypress writes its screenshot only after the failure event.
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+
+  runner.emit("end");
+
+  const attempt = readJson(path.join(projectRoot, outputFile)).tests[0].attempt;
+
+  assert.deepEqual(attempt.meta.screenshot, {
+    image: path.join(projectRoot, "artifacts/hook-shot.png"),
+  });
 });

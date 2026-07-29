@@ -8,11 +8,13 @@ const projectRoot = path.join(__dirname, "fixtures", "cypress-project");
 const resultsDir = path.join(projectRoot, "rwx-results");
 const screenshotsDir = path.join(projectRoot, "cypress", "screenshots");
 const videosDir = path.join(projectRoot, "cypress", "videos");
+const attachmentsDir = path.join(projectRoot, "cypress", "attachments");
 
 function cleanProjectOutputs() {
   fs.rmSync(resultsDir, { force: true, recursive: true });
   fs.rmSync(screenshotsDir, { force: true, recursive: true });
   fs.rmSync(videosDir, { force: true, recursive: true });
+  fs.rmSync(attachmentsDir, { force: true, recursive: true });
 }
 
 function readResults() {
@@ -58,11 +60,24 @@ test("runs Cypress and writes RWX results with retries and screenshots", async (
   assert.equal(pastAttempt.status.exception, "AssertionError");
   assert.match(pastAttempt.status.message, /expected 1 to equal 2/);
   assert.ok(pastAttempt.status.backtrace.length > 0);
-  assert.equal(pastAttempt.meta.fileAttachments.length, 1);
-  assert.equal(pastAttempt.meta.fileAttachments[0].name, "screenshot");
-  assert.ok(fs.existsSync(pastAttempt.meta.fileAttachments[0].path));
+  // The reporter's discovered screenshot and the hook's HTML snapshot coexist.
+  assert.deepEqual(Object.keys(pastAttempt.meta), ["screenshot"]);
   assert.match(
-    pastAttempt.meta.fileAttachments[0].path,
+    pastAttempt.meta.screenshot.image,
     /cypress\/screenshots\/reporter\.cy\.js\/rwx reporter integration -- retries with a screenshot \(failed\)\.png$/,
+  );
+  assert.match(
+    pastAttempt.meta.screenshot.html,
+    /cypress\/attachments\/rwx-reporter-integration-retries-with-a-screenshot-1\.html$/,
+  );
+  [pastAttempt.meta.screenshot.image, pastAttempt.meta.screenshot.html].forEach(
+    (file) => assert.ok(fs.existsSync(file), `missing ${file}`),
+  );
+
+  // The hook returns nothing for successful attempts, so it adds nothing.
+  assert.equal(retried.attempt.meta, undefined);
+  assert.equal(
+    results.tests.find((result) => result.name.endsWith("passes")).attempt.meta,
+    undefined,
   );
 });
