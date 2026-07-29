@@ -1,6 +1,10 @@
 on:
   github:
+    pull_request:
+      init:
+        commit-sha: ${{ event.git.sha }}
     push:
+      if: ${{ event.git.branch == 'main' }}
       init:
         commit-sha: ${{ event.git.sha }}
   cli:
