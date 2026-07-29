@@ -32,6 +32,31 @@ function createMochaTest(attributes) {
   };
 }
 
+// Only `title` survives on Cypress's `retry` event — cypress-io/cypress#27732.
+function createDegradedRetryTest({ title }) {
+  return {
+    title,
+    titlePath() {
+      return null;
+    },
+    fullTitle() {
+      return null;
+    },
+  };
+}
+
+// Verified against cypress@15.18.0: one `test` covers every attempt.
+function emitFlakyRetry(runner, flaky) {
+  runner.emit("test", flaky);
+  runner.emit(
+    "retry",
+    createDegradedRetryTest({ title: flaky.title }),
+    new Error("first failure"),
+  );
+  runner.emit("pass", flaky);
+  runner.emit("test end", flaky);
+}
+
 test("writes RWX results for passing, failing, and skipped tests", () => {
   const projectRoot = tmpdir();
   const outputFile = "results/rwx.json";
@@ -93,11 +118,7 @@ test("records retry attempts as pastAttempts", () => {
     reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
   });
 
-  runner.emit("test", flaky);
-  runner.emit("retry", flaky, new Error("first failure"));
-  flaky.duration = 25;
-  runner.emit("test", flaky);
-  runner.emit("pass", flaky);
+  emitFlakyRetry(runner, flaky);
   runner.emit("end");
 
   const results = readJson(path.join(projectRoot, outputFile));
@@ -116,13 +137,9 @@ test("merges Cypress retry events that omit suite and file data", () => {
   const projectRoot = tmpdir();
   const outputFile = "results/rwx.json";
   const runner = new EventEmitter();
-  const fullTest = createMochaTest({
+  const flaky = createMochaTest({
     titlePath: ["checkout", "submits"],
     file: "cypress/e2e/checkout.cy.js",
-    duration: 20,
-  });
-  const retryTest = createMochaTest({
-    titlePath: ["submits"],
     duration: 20,
   });
 
@@ -130,17 +147,16 @@ test("merges Cypress retry events that omit suite and file data", () => {
     reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
   });
 
-  runner.emit("test", fullTest);
-  runner.emit("retry", retryTest, new Error("first failure"));
-  fullTest.duration = 25;
-  runner.emit("test", fullTest);
-  runner.emit("pass", fullTest);
+  emitFlakyRetry(runner, flaky);
   runner.emit("end");
 
   const results = readJson(path.join(projectRoot, outputFile));
 
+  // The degraded `retry` event carries no suite and no file, so on its own it
+  // would name a test the spec never declared.
   assert.equal(results.summary.tests, 1);
   assert.equal(results.tests[0].name, "checkout submits");
+  assert.deepEqual(results.tests[0].lineage, ["checkout", "submits"]);
   assert.equal(results.tests[0].location.file, "cypress/e2e/checkout.cy.js");
   assert.equal(results.tests[0].pastAttempts.length, 1);
 });
@@ -235,9 +251,13 @@ test("attaches failure screenshots to the matching attempt", () => {
   new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot } });
 
   runner.emit("test", retried);
-  runner.emit("retry", retried, new Error("first failure"));
-  runner.emit("test", retried);
+  runner.emit(
+    "retry",
+    createDegradedRetryTest({ title: retried.title }),
+    new Error("first failure"),
+  );
   runner.emit("fail", retried, new Error("second failure"));
+  runner.emit("test end", retried);
   runner.emit("end");
 
   const results = readJson(path.join(projectRoot, outputFile));
@@ -283,13 +303,11 @@ test("invokes the hook for retry, pass, fail, and pending attempts", () => {
     },
   });
 
-  runner.emit("test", retried);
-  runner.emit("retry", retried, new Error("first failure"));
-  runner.emit("test", retried);
-  runner.emit("pass", retried);
+  emitFlakyRetry(runner, retried);
   runner.emit("test", failing);
   runner.emit("fail", failing, new Error("boom"));
-  runner.emit("test", pending);
+  runner.emit("test end", failing);
+  // Cypress reports a skipped test before it would have started it.
   runner.emit("pending", pending);
   runner.emit("end");
 
@@ -750,4 +768,189 @@ test("does not let the end-of-run back-fill replace a hook screenshot", () => {
   assert.deepEqual(attempt.meta.screenshot, {
     image: path.join(projectRoot, "artifacts/hook-shot.png"),
   });
+});
+
+function createRetryProbe() {
+  return createMochaTest({
+    titlePath: ["retry probe", "always fails"],
+    file: "cypress/e2e/retries-on.cy.js",
+  });
+}
+
+function attemptsOf(result) {
+  return [...(result.pastAttempts || []), result.attempt];
+}
+
+// The three failure events Cypress emits for a test retried twice and failing
+// every time: the middle two degraded, the last one whole.
+function emitRetriedFailure(runner, failing) {
+  const degraded = () => createDegradedRetryTest({ title: failing.title });
+
+  runner.emit("test", failing);
+  runner.emit("retry", degraded(), new Error("first failure"));
+  runner.emit("retry", degraded(), new Error("second failure"));
+  runner.emit("fail", failing, new Error("third failure"));
+  runner.emit("test end", failing);
+}
+
+test("merges every degraded retry event of a test that fails each attempt", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+
+  new RwxReporter(runner, {
+    reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
+  });
+
+  emitRetriedFailure(runner, failing);
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+  const result = results.tests[0];
+
+  // Cypress ran one failing test three times. Every attempt belongs to it, so
+  // there is no second record, and the counts describe the spec as written.
+  assert.equal(results.tests.length, 1);
+  assert.equal(results.summary.tests, 1);
+  assert.equal(results.summary.failed, 1);
+  assert.equal(results.summary.retries, 1);
+  assert.equal(result.name, "retry probe always fails");
+  assert.deepEqual(result.lineage, ["retry probe", "always fails"]);
+  assert.equal(result.location.file, "cypress/e2e/retries-on.cy.js");
+  assert.equal(result.pastAttempts.length, 2);
+  assert.deepEqual(
+    attemptsOf(result).map((attempt) => attempt.status.message),
+    ["first failure", "second failure", "third failure"],
+  );
+});
+
+test("numbers the attempts of a retried failure the way Cypress names its screenshots", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const spec = "retries-on.cy.js";
+  const baseName = "retry probe -- always fails (failed)";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+
+  ["", " (attempt 2)", " (attempt 3)"].forEach((suffix) => {
+    const screenshotPath = screenshotPathFor(
+      projectRoot,
+      spec,
+      `${baseName}${suffix}`,
+    );
+
+    fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+    fs.writeFileSync(screenshotPath, "png");
+  });
+
+  new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot } });
+
+  emitRetriedFailure(runner, failing);
+  runner.emit("end");
+
+  const result = readJson(path.join(projectRoot, outputFile)).tests[0];
+
+  // Cypress writes one screenshot per attempt and numbers them from its own
+  // retry counter. Dropping an attempt used to shift every later attempt onto
+  // the previous attempt's image, with nothing to signal the mismatch.
+  assert.deepEqual(
+    attemptsOf(result).map((attempt) =>
+      path.basename(attempt.meta.screenshot.image),
+    ),
+    [
+      `${baseName}.png`,
+      `${baseName} (attempt 2).png`,
+      `${baseName} (attempt 3).png`,
+    ],
+  );
+});
+
+test("starts each retried attempt where the previous one finished", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
+  });
+  let tick = 0;
+
+  reporter.now = () => new Date(Date.UTC(2026, 0, 1, 0, 0, (tick += 1)));
+
+  emitRetriedFailure(runner, failing);
+  runner.emit("end");
+
+  const result = readJson(path.join(projectRoot, outputFile)).tests[0];
+  const attempts = attemptsOf(result);
+
+  // Cypress emits no second `test` event for a retry, so without carrying the
+  // clock forward every attempt after the first serialized with no `startedAt`.
+  attempts.forEach((attempt, index) => {
+    assert.ok(attempt.startedAt, `attempt ${index + 1} has no startedAt`);
+
+    if (index > 0) {
+      assert.equal(attempt.startedAt, attempts[index - 1].finishedAt);
+    }
+  });
+});
+
+test("keeps a degraded event for another test out of the test in flight", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+
+  new RwxReporter(runner, {
+    reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit(
+    "retry",
+    createDegradedRetryTest({ title: "a different test", currentRetry: 0 }),
+    new Error("elsewhere"),
+  );
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  // Only a title match earns the merge. An event we can't place stays its own
+  // record rather than inventing an extra attempt on an unrelated test, and it
+  // still carries the spec so consumers can locate it.
+  assert.deepEqual(
+    results.tests.map((result) => result.name),
+    ["retry probe always fails", "a different test"],
+  );
+  assert.equal(results.tests[0].pastAttempts, undefined);
+  assert.equal(results.tests[1].location.file, "cypress/e2e/retries-on.cy.js");
+});
+
+test("locates a record from a spec seen elsewhere in the run", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+
+  new RwxReporter(runner, {
+    reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
+  });
+
+  // The only test that reports is one there is no location on. The test that
+  // could supply it started and then never reported an attempt of its own, so a
+  // record has to take the spec from what the run saw rather than from itself.
+  runner.emit("test", failing);
+  runner.emit(
+    "fail",
+    createDegradedRetryTest({ title: "a different test" }),
+    new Error("boom"),
+  );
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  assert.equal(results.tests.length, 1);
+  assert.equal(results.tests[0].name, "a different test");
+  assert.equal(results.tests[0].location.file, "cypress/e2e/retries-on.cy.js");
 });

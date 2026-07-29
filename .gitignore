@@ -5,3 +5,4 @@ cypress/videos/
 
 # Cypress fixture project outputs
 test/fixtures/cypress-project/cypress/attachments/
+test/fixtures/cypress-retries-project/cypress/attempts/
