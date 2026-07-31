@@ -89,6 +89,12 @@ test("writes RWX results for passing, failing, and skipped tests", () => {
 
   const results = readJson(path.join(projectRoot, outputFile));
 
+  // Captain selects its parser off this URL, so a typo here silently costs us
+  // every downstream consumer.
+  assert.equal(
+    results.$schema,
+    "https://raw.githubusercontent.com/rwx-research/test-results-schema/main/v1.json",
+  );
   assert.deepEqual(results.framework, {
     language: "JavaScript",
     kind: "Cypress",
