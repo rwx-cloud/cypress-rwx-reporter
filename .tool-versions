@@ -1,1 +1,3 @@
 nodejs 24.18.0
+# Look at the latest captain to assert that parsing works properly
+github:rwx-research/captain latest

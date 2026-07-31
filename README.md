@@ -130,6 +130,7 @@ Once loaded, errors are contained and logged, so results are always written.
 
 - `outputFile`, `resultsFile`, or `rwxFile`: output path. Defaults to `rwx-results/results-[hash].json`.
 - `screenshotsFolder`: Cypress screenshots folder. Defaults to `cypress/screenshots`.
+- `specFile`: Rarely needed. Spec path to look for screenshots under, overriding the path recorded on the test.
 - `projectRoot`: optional project root override for relative output and screenshot paths. Defaults to Cypress's project root when available, then `process.cwd()`.
 - `includeScreenshots`: set to `false` to skip screenshot lookup.
 - `attachmentsHook`: path to a JavaScript file exporting a function that returns an extra screenshot or HTML snapshot per attempt. Absolute, or relative to the project root. See [Custom attachments](#custom-attachments).
