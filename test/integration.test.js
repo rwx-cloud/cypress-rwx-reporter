@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
@@ -27,6 +28,37 @@ function cleanOutputs(root) {
   );
 }
 
+const captainVersion = (() => {
+  const probe = spawnSync("captain", ["--version"], { encoding: "utf8" });
+
+  return probe.status === 0 ? probe.stdout.trim() : null;
+})();
+
+test("captain is available to check the results contract", () => {
+  assert.ok(
+    captainVersion,
+    "captain is not on PATH. Install it with `mise install`.",
+  );
+});
+
+function assertCaptainParses(file) {
+  // Already reported by the availability test above; bailing here keeps that
+  // one failure from turning into one per fixture.
+  if (!captainVersion) {
+    return;
+  }
+
+  const parsed = spawnSync("captain", ["parse", "results", file], {
+    encoding: "utf8",
+  });
+
+  assert.equal(
+    parsed.status,
+    0,
+    `captain ${captainVersion} could not parse ${file}: ${parsed.stderr.trim()}`,
+  );
+}
+
 // The reporter writes one results file per spec. `spec` picks one out by the
 // `[spec]` token in its filename; omit it for a project with a single spec.
 function readResults(root, spec = "") {
@@ -41,7 +73,10 @@ function readResults(root, spec = "") {
     `expected one results file for ${spec || root}`,
   );
 
-  return JSON.parse(fs.readFileSync(path.join(directory, files[0]), "utf8"));
+  const file = path.join(directory, files[0]);
+  assertCaptainParses(file);
+
+  return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
 function attemptsOf(result) {

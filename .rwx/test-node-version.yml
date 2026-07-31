@@ -32,6 +32,12 @@ tasks:
     with:
       chrome-version: stable
 
+  - key: captain
+    call: rwx/install-captain 1.1.7
+
   - key: integration-tests
-    use: [chrome, node-modules]
-    run: npm run test:integration
+    use: [chrome, node-modules, captain]
+    run: |
+      # Record version of captain these tests ran on
+      captain --version
+      npm run test:integration
