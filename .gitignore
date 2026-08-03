@@ -3,6 +3,7 @@ rwx-results/
 cypress/screenshots/
 cypress/videos/
 
-# Cypress fixture project outputs
+test/fixtures/*/cypress/screenshots/
+test/fixtures/*/cypress/videos/
 test/fixtures/cypress-project/cypress/attachments/
 test/fixtures/cypress-retries-project/cypress/attempts/
