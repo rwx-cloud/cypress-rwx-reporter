@@ -34,6 +34,25 @@ cypress/screenshots/<spec path>/<suite -- test> (failed).png
 cypress/screenshots/<spec path>/<suite -- test> (failed) (attempt 2).png
 ```
 
+### Failing hooks
+
+A failing `before`, `beforeEach`, `after`, or `afterEach` hook is not a test, so it is reported in `otherErrors` rather than as one:
+
+```json
+{
+  "message": "expected 'hook' to equal 'broken'",
+  "exception": "AssertionError",
+  "location": { "file": "cypress/e2e/login.cy.js" },
+  "meta": {
+    "hook": "before each",
+    "screenshot": { "image": "cypress/screenshots/login.cy.js/login -- loads -- before each hook (failed).png" }
+  }
+}
+```
+
+- When a `before` or `beforeEach` hook fails, tests which are stopped from running are `skipped`. This differs slightly from Cypress's classification, but is most accurate and stops a flaky before hook from pinning blame on a test.
+- A test whose body passed before its `after` or `afterEach` hook failed is `successful`.
+
 If your Cypress config changes `screenshotsFolder`, configure the `screenshotsFolder` in `reporterOptions` as well:
 
 ```js
