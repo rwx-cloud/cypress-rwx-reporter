@@ -5,8 +5,8 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   callAttachmentsHook,
+  isThenable,
   loadAttachmentsHook,
-  readOnly,
   validateAttachments,
 } = require("../lib/attachments");
 
@@ -53,7 +53,6 @@ test("treats returning nothing as a silent no-op", () => {
 
 test("rejects return values that are not plain objects", () => {
   const cases = [
-    [Promise.resolve({}), /returned a Promise/],
     [[{ name: "a", path: "b" }], /returned an array/],
     ["snapshot.html", /returned a string/],
     [42, /returned a number/],
@@ -152,48 +151,34 @@ test("contains a hook that throws and reports it", () => {
   assert.match(warnings[0], /attachmentsHook threw: Error: boom/);
 });
 
-test("exposes reads through the read-only test object", () => {
-  const suite = { title: "suite" };
-  const target = {
-    title: "test",
-    parent: suite,
-    titlePath() {
-      return [this.parent.title, this.title];
+test("contains a hook that throws before it returns a promise", async () => {
+  const warnings = [];
+  const result = callAttachmentsHook(
+    () => {
+      throw new Error("sync boom");
     },
-    fullTitle() {
-      return this.titlePath().join(" ");
-    },
-  };
-  const view = readOnly(target);
+    [],
+    (message) => warnings.push(message),
+  );
 
-  assert.equal(view.title, "test");
-  assert.equal(view.fullTitle(), "suite test");
-  assert.deepEqual(view.titlePath(), ["suite", "test"]);
-  assert.equal(readOnly(target), view, "proxies are cached per object");
+  assert.equal(result, null);
+  assert.match(warnings[0], /attachmentsHook threw: Error: sync boom/);
 });
 
-test("refuses writes through the read-only test object", () => {
-  const target = { title: "test", parent: { title: "suite" }, err: null };
-  const view = readOnly(target);
+test("recognises what the reporter can await", () => {
+  const thenables = [
+    Promise.resolve(),
+    { then() {} },
+    Object.assign(() => {}, { then() {} }),
+  ];
 
-  assert.throws(() => {
-    view.title = "hijacked";
-  }, /may not modify "title"/);
-  assert.throws(() => {
-    delete view.err;
-  }, /may not modify "err"/);
-  assert.throws(() => {
-    Object.defineProperty(view, "extra", { value: 1 });
-  }, /may not modify "extra"/);
+  for (const value of thenables) {
+    assert.equal(isThenable(value), true);
+  }
 
-  // Nested objects are wrapped too, so the suite cannot be reached around it.
-  assert.throws(() => {
-    view.parent.title = "hijacked";
-  }, /may not modify "title"/);
-
-  assert.equal(target.title, "test");
-  assert.equal(target.parent.title, "suite");
-  assert.ok("err" in target);
+  for (const value of [undefined, null, {}, 42, "then", [], () => {}]) {
+    assert.equal(isThenable(value), false);
+  }
 });
 
 test("treats an unset attachmentsHook as disabled", () => {
@@ -265,12 +250,32 @@ test("unwraps a transpiled default export", () => {
   assert.deepEqual(hook(), { screenshot: { html: "artifacts/report.html" } });
 });
 
-test("rejects an async hook", () => {
-  assert.throws(
-    () => loadAttachmentsHook(fixture("attachments-hook-async.js"), __dirname),
-    /exports an async function.*cannot await it/s,
+test("loads an async hook", async () => {
+  const hook = loadAttachmentsHook(
+    fixture("attachments-hook-async.js"),
+    __dirname,
   );
+
+  assert.deepEqual(await hook(), {
+    screenshot: { html: "artifacts/report.html" },
+  });
 });
+
+// `require` cannot load a module graph that awaits before it finishes.
+test(
+  "reports a hook module that awaits at the top level",
+  { skip: !requiresEsm },
+  () => {
+    assert.throws(
+      () =>
+        loadAttachmentsHook(
+          fixture("esm-hooks/attachments-await.js"),
+          __dirname,
+        ),
+      /Could not load attachmentsHook .*top-level await/s,
+    );
+  },
+);
 
 test("reports a missing hook file", () => {
   assert.throws(

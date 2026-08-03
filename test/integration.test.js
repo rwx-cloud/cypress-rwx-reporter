@@ -88,6 +88,7 @@ function attemptsOf(result) {
   return [...(result.pastAttempts || []), result.attempt];
 }
 
+// Sorted: attempts can be in flight together, so finish order is not a contract.
 function readAttemptNumbers(title) {
   return fs
     .readFileSync(
@@ -102,7 +103,8 @@ function readAttemptNumbers(title) {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line))
-    .filter((entry) => entry.title === title);
+    .filter((entry) => entry.title === title)
+    .sort((one, other) => one.attemptNumber - other.attemptNumber);
 }
 
 test("runs Cypress and writes RWX results with retries and screenshots", async (t) => {
@@ -138,7 +140,7 @@ test("runs Cypress and writes RWX results with retries and screenshots", async (
   assert.equal(pastAttempt.status.exception, "AssertionError");
   assert.match(pastAttempt.status.message, /expected 1 to equal 2/);
   assert.ok(pastAttempt.status.backtrace.length > 0);
-  // The reporter's discovered screenshot and the hook's HTML snapshot coexist.
+  // A synchronous hook in a real Cypress run; the retries project covers async.
   assert.deepEqual(Object.keys(pastAttempt.meta), ["screenshot"]);
   assert.match(
     pastAttempt.meta.screenshot.image,
@@ -214,9 +216,8 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
       ),
     );
 
-    // Same agreement stated directly: the attempt number the reporter reports —
-    // to the attachments hook, and to screenshot discovery — tracks Cypress's
-    // retry counter rather than drifting behind it.
+    // The attempt number the reporter reports — to the hook, and to screenshot
+    // discovery — tracks Cypress's retry counter rather than drifting behind it.
     const logged = readAttemptNumbers("always fails");
 
     assert.deepEqual(
@@ -270,6 +271,25 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
       assert.deepEqual(
         attemptsOf(result).map((attempt) => attempt.status.kind),
         ["failed", "failed", "successful"],
+      );
+
+      // Read off the live test instead, all three would say "passed".
+      const logged = readAttemptNumbers("passes on the third attempt");
+
+      assert.deepEqual(
+        logged.map((entry) => entry.state),
+        ["failed", "failed", "passed"],
+      );
+
+      // The live test carries no error through a retry, so without the event's
+      // these would read as `null`.
+      assert.deepEqual(
+        logged.map((entry) => entry.viewError),
+        logged.map((entry) => entry.argumentError),
+      );
+      assert.deepEqual(
+        logged.map((entry) => entry.viewError),
+        ["expected 1 to equal 3", "expected 2 to equal 3", null],
       );
     },
   );
