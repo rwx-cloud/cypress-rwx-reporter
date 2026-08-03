@@ -25,7 +25,7 @@ The reporter defaults to `rwx-results/results-[hash].json`. Cypress runs each sp
 
 ## Output
 
-The reporter emits RWX v1 JSON. Unlike other Cypress reporters, all retry attempts of a test will appear in the test results. Additionally, if Cypress produced screenshots for a failing test, the screenshot path will be attached to the test in `attempt.meta.fileAttachments` and `attempt.meta.screenshot.image`. An [attachments hook](#custom-attachments) can add an HTML snapshot alongside it.
+The reporter emits RWX v1 JSON. Unlike other Cypress reporters, all retry attempts of a test will appear in the test results. Additionally, if Cypress produced a screenshot for a failing test, the path is attached to the attempt as `attempt.meta.screenshot.image`. An [attachments hook](#custom-attachments) can add an HTML snapshot alongside it as `attempt.meta.screenshot.html`.
 
 Failure screenshots are discovered from Cypress's default screenshot layout:
 
