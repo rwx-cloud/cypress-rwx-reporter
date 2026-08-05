@@ -135,11 +135,14 @@ untouched — returning only `html` keeps the discovered `image` alongside it.
 RWX only uploads screenshots for attempts that did not succeed, so returning one
 for a passing attempt has no visible effect.
 
-### The test object
+### Reading the test object
 
-**Read what you need from `test` before your first `await`.** Cypress mutates one
-test object in place as a test retries, so `test` stops answering once the
-hook awaits rather than answering wrongly:
+`test` is the Mocha test object, describing the one attempt the hook was invoked
+for. `state`, `err`, and `duration` are that attempt's. Writes to it are refused.
+
+**Read what you need before your first `await`.** Once the hook awaits, `test` no
+longer describes the attempt it was invoked for, so reads throw instead of
+answering for a different one:
 
 ```js
 module.exports = async function attachments(test, kind, error, context) {
@@ -147,29 +150,22 @@ module.exports = async function attachments(test, kind, error, context) {
 
   await somethingSlow();
 
-  test.state; // throws: the view has expired
+  test.state; // throws
 };
 ```
 
-`state`, `err`, and `duration` describe the attempt being reported. Cypress writes
-an attempt's outcome onto the test only after emitting the event for it, so the
-live object lags through a retry; the reporter takes those three from the event.
-Writes to `test` are refused.
-
 ### Behaviour
 
-The hook may be `async`, or return a promise. The reporter waits for whatever is
-still outstanding before writing a spec's results, and Cypress waits for the
-reporter in turn, once per spec. A synchronous hook defers nothing.
+The hook runs once per attempt, including attempts that succeeded and tests
+Cypress never started. Module-level state persists across specs.
 
-The wait is bounded by [`attachmentsTimeout`](#options), 30 seconds by default.
-Cypress applies no timeout of its own, so a hook whose promise never settles
-would otherwise hang the run with nothing to say why. When the wait expires the
-reporter logs a warning, writes the results without that hook's attachments, and
-carries on.
+The hook may be `async`, or return a promise. **Return a promise for work that has
+to finish before the results are written**: the reporter waits for the promises the
+hook returns, and knows nothing about work the hook starts without returning one.
 
-The hook is required once per process, so module-level state persists across
-specs, and it runs for every attempt.
+That wait is bounded by [`attachmentsTimeout`](#options), 30 seconds by default.
+When it expires the reporter logs a warning, writes the results without the
+attachments that had not arrived, and carries on.
 
 CommonJS (`module.exports = …`) always works. ES modules (`export default …`)
 work on Node 20.19+ and 22.12+, and TypeScript hooks work on Node 23.6+, both
