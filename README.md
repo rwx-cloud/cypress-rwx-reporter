@@ -69,7 +69,7 @@ module.exports = defineConfig({
 
 To attach anything beyond Cypress's own failure screenshots, point `attachmentsHook` at a
 JavaScript file. Its exported function runs once per attempt and returns a description of what
-to attach.
+to attach. It may be `async`.
 
 ```js
 module.exports = defineConfig({
@@ -82,13 +82,16 @@ module.exports = defineConfig({
 
 ```js
 // cypress/rwx-attachments.js
-module.exports = function attachments(test, kind, error, context) {
+module.exports = async function attachments(test, kind, error, context) {
   if (kind !== "failed") {
     return;
   }
 
+  // Read the test before awaiting anything. See "The test object".
+  const title = test.fullTitle();
+
   // `error` may be undefined even for a failed attempt.
-  const file = writeReport(test, error ? error.message : "");
+  const file = await writeReport(title, error ? error.message : "");
 
   return { screenshot: { html: file } };
 };
@@ -96,7 +99,8 @@ module.exports = function attachments(test, kind, error, context) {
 
 ### Arguments
 
-- `test`: the Mocha test object, wrapped so it is read-only.
+- `test`: the Mocha test object, read-only, and valid only until the hook awaits.
+  See [The test object](#the-test-object).
 - `kind`: `"successful"`, `"failed"`, or `"skipped"`.
 - `error`: the failure, always `undefined` for passing and skipped attempts.
 - `context`: `{ attemptNumber, startedAt, finishedAt, screenshot, projectRoot }`.
@@ -131,19 +135,51 @@ untouched — returning only `html` keeps the discovered `image` alongside it.
 RWX only uploads screenshots for attempts that did not succeed, so returning one
 for a passing attempt has no visible effect.
 
+### The test object
+
+**Read what you need from `test` before your first `await`.** Cypress mutates one
+test object in place as a test retries, so `test` stops answering once the
+hook awaits rather than answering wrongly:
+
+```js
+module.exports = async function attachments(test, kind, error, context) {
+  const title = test.fullTitle(); // read up front
+
+  await somethingSlow();
+
+  test.state; // throws: the view has expired
+};
+```
+
+`state`, `err`, and `duration` describe the attempt being reported. Cypress writes
+an attempt's outcome onto the test only after emitting the event for it, so the
+live object lags through a retry; the reporter takes those three from the event.
+Writes to `test` are refused.
+
 ### Behaviour
 
-The hook must be **synchronous** — the reporter cannot await a promise, so an
-`async` function is rejected at startup. It is required once per process, so
-module-level state persists across specs, and it runs for every attempt.
+The hook may be `async`, or return a promise. The reporter waits for whatever is
+still outstanding before writing a spec's results, and Cypress waits for the
+reporter in turn, once per spec. A synchronous hook defers nothing.
+
+The wait is bounded by [`attachmentsTimeout`](#options), 30 seconds by default.
+Cypress applies no timeout of its own, so a hook whose promise never settles
+would otherwise hang the run with nothing to say why. When the wait expires the
+reporter logs a warning, writes the results without that hook's attachments, and
+carries on.
+
+The hook is required once per process, so module-level state persists across
+specs, and it runs for every attempt.
 
 CommonJS (`module.exports = …`) always works. ES modules (`export default …`)
 work on Node 20.19+ and 22.12+, and TypeScript hooks work on Node 23.6+, both
-via Node's own support for requiring them — but a hook using top-level `await`
-can never be loaded. On older Node you get a clear error at startup.
+via Node's own support for requiring them. The module is loaded synchronously, at
+startup, so it may not use top-level `await` — put awaited work inside the hook,
+which may be `async`. On older Node you get a clear error at startup.
 
-A hook file that is missing or fails to load stops the run immediately.
-Once loaded, errors are contained and logged, so results are always written.
+A hook file that is missing or fails to load stops the run immediately. Once
+loaded, errors are contained and logged — a thrown exception and a rejected
+promise alike — so results are always written.
 
 ## Options
 
@@ -153,4 +189,5 @@ Once loaded, errors are contained and logged, so results are always written.
 - `projectRoot`: optional project root override for relative output and screenshot paths. Defaults to Cypress's project root when available, then `process.cwd()`.
 - `includeScreenshots`: set to `false` to skip screenshot lookup.
 - `attachmentsHook`: path to a JavaScript file exporting a function that returns an extra screenshot or HTML snapshot per attempt. Absolute, or relative to the project root. See [Custom attachments](#custom-attachments).
+- `attachmentsTimeout`: how long to wait, in milliseconds, for outstanding `attachmentsHook` work before writing a spec's results without it. Defaults to `30000`.
 - `toConsole`: set to `true` to print the RWX JSON to stdout.

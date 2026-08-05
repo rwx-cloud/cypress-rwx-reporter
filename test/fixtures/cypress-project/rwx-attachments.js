@@ -14,6 +14,8 @@ function slugify(value) {
     .replace(/^-|-$/g, "");
 }
 
+// Synchronous on purpose: keep it that way, so a real Cypress run still covers a
+// hook that defers nothing. The retries project's hook is the async one.
 module.exports = function attachments(test, kind, error, context) {
   if (kind !== "failed") {
     return;

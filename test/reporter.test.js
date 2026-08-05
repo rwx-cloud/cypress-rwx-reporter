@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const EventEmitter = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -6,8 +7,29 @@ const path = require("node:path");
 const test = require("node:test");
 const RwxReporter = require("../index");
 
+const LOG_PREFIX = "[@rwx-cloud/cypress-rwx-reporter]";
+
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cypress-rwx-reporter-"));
+}
+
+// Passes every non-reporter write through: the test runner's own output goes
+// through `process.stdout.write` too, and swallowing it loses test results.
+function captureWarnings(t) {
+  const warnings = [];
+  const write = process.stdout.write.bind(process.stdout);
+
+  t.mock.method(process.stdout, "write", (chunk, ...rest) => {
+    if (typeof chunk === "string" && chunk.startsWith(LOG_PREFIX)) {
+      warnings.push(chunk);
+
+      return true;
+    }
+
+    return write(chunk, ...rest);
+  });
+
+  return warnings;
 }
 
 function readJson(file) {
@@ -23,6 +45,11 @@ function createMochaTest(attributes) {
     duration: attributes.duration,
     consoleOutputs: attributes.consoleOutputs,
     consoleErrors: attributes.consoleErrors,
+    state: undefined,
+    _currentRetry: 0,
+    currentRetry() {
+      return this._currentRetry;
+    },
     titlePath() {
       return titlePath;
     },
@@ -398,7 +425,7 @@ test("contains a hook that throws", (t) => {
 
   fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
   fs.writeFileSync(screenshotPath, "png");
-  t.mock.method(process.stdout, "write", () => true);
+  const warnings = captureWarnings(t);
 
   new RwxReporter(runner, {
     reporterOptions: {
@@ -417,9 +444,6 @@ test("contains a hook that throws", (t) => {
   const results = readJson(path.join(projectRoot, outputFile));
   const byName = Object.fromEntries(
     results.tests.map((result) => [result.name, result]),
-  );
-  const warnings = process.stdout.write.mock.calls.map(
-    (call) => call.arguments[0],
   );
 
   // The fixture reads error.message, so it succeeds on the failure and throws
@@ -443,7 +467,7 @@ test("stops a hook from mutating the test object", (t) => {
     file: "cypress/e2e/hook.cy.js",
   });
 
-  t.mock.method(process.stdout, "write", () => true);
+  const warnings = captureWarnings(t);
 
   new RwxReporter(runner, {
     reporterOptions: {
@@ -459,10 +483,6 @@ test("stops a hook from mutating the test object", (t) => {
   runner.emit("end");
 
   const results = readJson(path.join(projectRoot, outputFile));
-  const warnings = process.stdout.write.mock.calls.map(
-    (call) => call.arguments[0],
-  );
-
   // The write throws, so the hook is contained and contributes nothing, and
   // the reporter's view of the test is untouched.
   assert.equal(failing.title, "saves");
@@ -931,6 +951,796 @@ test("keeps a degraded event for another test out of the test in flight", () => 
   );
   assert.equal(results.tests[0].pastAttempts, undefined);
   assert.equal(results.tests[1].location.file, "cypress/e2e/retries-on.cy.js");
+});
+
+function finish(reporter, failures = 0) {
+  return new Promise((resolve) => reporter.done(failures, resolve));
+}
+
+
+// What cypress@15.18.0 does to the one live test object between attempts: it
+// writes an attempt's outcome only after emitting the event, so the live test lags
+// while the event object has the attempt's state, error, and duration. The retry
+// counter is already right on the live test.
+function emitLiveRetriedFailure(runner, failing) {
+  const retryEvent = (state, err, duration) => ({
+    ...createDegradedRetryTest({ title: failing.title }),
+    currentRetry: 2,
+    duration,
+    err,
+    state,
+  });
+  const firstFailure = new Error("first failure");
+  const secondFailure = new Error("second failure");
+  const thirdFailure = new Error("third failure");
+
+  failing.state = "skipped";
+
+  runner.emit("test", failing);
+  runner.emit("retry", retryEvent("failed", firstFailure, 87), firstFailure);
+
+  // Caught up to attempt 1, no further.
+  failing._currentRetry = 1;
+  failing.state = "failed";
+  failing.duration = 87;
+  runner.emit("retry", retryEvent("failed", secondFailure, 91), secondFailure);
+
+  failing._currentRetry = 2;
+  failing.err = thirdFailure;
+  failing.duration = 95;
+  runner.emit("fail", failing, thirdFailure);
+  runner.emit("test end", failing);
+}
+
+test("waits for an async hook and hands it the attempt it was invoked for", async () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-async-state.js"),
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  emitLiveRetriedFailure(runner, failing);
+  runner.emit("end");
+
+  assert.equal(
+    fs.existsSync(path.join(projectRoot, outputFile)),
+    false,
+    "results were written before the hook finished",
+  );
+
+  await finish(reporter, 1);
+
+  const result = readJson(path.join(projectRoot, outputFile)).tests[0];
+
+  // Each attempt reports its own counter and error rather than the last attempt's.
+  assert.deepEqual(
+    attemptsOf(result).map((attempt) =>
+      path.basename(attempt.meta.screenshot.html, ".html"),
+    ),
+    [
+      "failed-1-0-failed-retry-probe-always-fails-first-failure",
+      "failed-2-1-failed-retry-probe-always-fails-second-failure",
+      "failed-3-2-failed-retry-probe-always-fails-third-failure",
+    ],
+  );
+});
+
+test("gives a passing attempt no error, even a stale one", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const hook = path.join(projectRoot, "hook.js");
+  const seen = path.join(projectRoot, "seen.jsonl");
+  const runner = new EventEmitter();
+  const flaky = createMochaTest({
+    titlePath: ["flaky"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  fs.writeFileSync(
+    hook,
+    `module.exports = (test, kind, error) =>
+  require("node:fs").appendFileSync(
+    ${JSON.stringify(seen)},
+    JSON.stringify({
+      kind,
+      error: error ? error.message : null,
+      testErr: test.err ? test.err.message : null,
+    }) + "\\n",
+  );\n`,
+    "utf8",
+  );
+
+  new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hook,
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", flaky);
+  // Cypress leaves the failed attempt's error on the live test.
+  flaky.err = new Error("stale failure from an earlier attempt");
+  runner.emit("pass", flaky);
+  runner.emit("end");
+
+  const recorded = JSON.parse(fs.readFileSync(seen, "utf8").trim());
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  assert.equal(recorded.kind, "successful");
+  assert.equal(recorded.error, null);
+  assert.equal(results.tests[0].attempt.status.kind, "successful");
+  assert.equal(results.tests[0].attempt.status.message, undefined);
+});
+
+// A test the spec declared but Cypress never ran has no event of its own, so the
+// reporter synthesises a skipped attempt from the spec graph.
+function createDeclaredSpec(file) {
+  const root = {
+    type: "suite",
+    title: "",
+    file,
+    root: true,
+    suites: [],
+    tests: [],
+    titlePath: () => [],
+    fullTitle: () => "",
+  };
+
+  return root;
+}
+
+test("waits for an async hook on a test the spec declared but never ran", async () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const hook = path.join(projectRoot, "hook.js");
+  const runner = new EventEmitter();
+  const root = createDeclaredSpec("cypress/e2e/hook.cy.js");
+  const ran = createMochaTest({
+    titlePath: ["ran"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const neverRan = createMochaTest({
+    titlePath: ["never ran"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  root.tests.push(ran, neverRan);
+  fs.mkdirSync(path.join(projectRoot, "artifacts"), { recursive: true });
+  fs.writeFileSync(
+    hook,
+    `const fs = require("node:fs/promises");
+const path = require("node:path");
+
+module.exports = async function attachments(test, kind, error, context) {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const file = path.join(context.projectRoot, "artifacts", kind + ".html");
+
+  await fs.writeFile(file, "<html>", "utf8");
+
+  return { screenshot: { html: file } };
+};\n`,
+    "utf8",
+  );
+
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hook,
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("suite", root);
+  runner.emit("test", ran);
+  runner.emit("pass", ran);
+  runner.emit("test end", ran);
+  runner.emit("end");
+
+  await finish(reporter);
+
+  const byName = Object.fromEntries(
+    readJson(path.join(projectRoot, outputFile)).tests.map((result) => [
+      result.name,
+      result,
+    ]),
+  );
+
+  assert.equal(byName["never ran"].attempt.status.kind, "skipped");
+  assert.equal(
+    path.basename(byName["never ran"].attempt.meta.screenshot.html),
+    "skipped.html",
+  );
+  assert.equal(
+    path.basename(byName.ran.attempt.meta.screenshot.html),
+    "successful.html",
+  );
+});
+
+// Screenshot discovery and the end-of-run back-fill sit either side of the hook's
+// merge, which the async path moves to after the last event.
+test("keeps discovery and the late back-fill around an async hook", async () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const screenshotPath = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/late.cy.js",
+    "late (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["late"],
+    file: "cypress/e2e/late.cy.js",
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-async-html.js"),
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+
+  // Cypress writes its screenshot only after the failure event.
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  const attempt = readJson(path.join(projectRoot, outputFile)).tests[0].attempt;
+
+  // Only HTML, so the back-fill still has to merge rather than replace.
+  assert.deepEqual(attempt.meta.screenshot, {
+    html: path.join(projectRoot, "artifacts/async-hook.html"),
+    image: screenshotPath,
+  });
+});
+
+test("lets an async hook's screenshot beat discovery and the back-fill", async () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const discovered = screenshotPathFor(
+    projectRoot,
+    "cypress/e2e/hook.cy.js",
+    "failing (failed)",
+  );
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  // Discovered before the event, so the hook's has to win and the back-fill has
+  // to leave it alone.
+  fs.mkdirSync(path.dirname(discovered), { recursive: true });
+  fs.writeFileSync(discovered, "png");
+
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-async-image.js"),
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  const attempt = readJson(path.join(projectRoot, outputFile)).tests[0].attempt;
+
+  assert.deepEqual(attempt.meta.screenshot, {
+    image: path.join(projectRoot, "artifacts/async-hook.png"),
+  });
+});
+
+test("refuses a mutation an async hook attempts after awaiting", async (t) => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["todos", "saves"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-async-mutating.js"),
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+  const warnings = captureWarnings(t);
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  // The refusal arrives as a rejection rather than a throw.
+  assert.equal(failing.title, "saves");
+  assert.equal(results.tests[0].name, "todos saves");
+  assert.equal(results.tests[0].attempt.meta, undefined);
+  assert.equal(
+    warnings.filter(
+      (warning) =>
+        /attachmentsHook rejected/.test(warning) &&
+        /may not modify "title"/.test(warning),
+    ).length,
+    1,
+  );
+});
+
+test("refuses a read an async hook attempts after awaiting", async (t) => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["todos", "saves"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-async-expired.js"),
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+  const warnings = captureWarnings(t);
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  // Only the attachment is lost.
+  assert.equal(results.tests[0].name, "todos saves");
+  assert.equal(results.tests[0].attempt.status.kind, "failed");
+  assert.equal(results.tests[0].attempt.meta, undefined);
+  assert.equal(
+    warnings.filter(
+      (warning) =>
+        /attachmentsHook rejected/.test(warning) &&
+        /read "state" from the test object after awaiting/.test(warning) &&
+        /before your first await/.test(warning),
+    ).length,
+    1,
+    `expected a warning naming the contract, got ${JSON.stringify(warnings)}`,
+  );
+});
+
+test("validates what an async hook resolves to", async (t) => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const hook = path.join(projectRoot, "hook.js");
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  fs.writeFileSync(
+    hook,
+    'module.exports = async () => "artifacts/report.html";\n',
+    "utf8",
+  );
+
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hook,
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+  const warnings = captureWarnings(t);
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  assert.equal(
+    readJson(path.join(projectRoot, outputFile)).tests[0].attempt.meta,
+    undefined,
+  );
+  assert.equal(
+    warnings.filter((warning) => /returned a string/.test(warning)).length,
+    1,
+  );
+});
+
+test("invokes an async hook for retry, pass, fail, and pending attempts", async () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const hook = path.join(projectRoot, "hook.js");
+  const runner = new EventEmitter();
+  const retried = createMochaTest({
+    titlePath: ["retried"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const pending = createMochaTest({
+    titlePath: ["pending"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  fs.mkdirSync(path.join(projectRoot, "artifacts"), { recursive: true });
+  fs.writeFileSync(
+    hook,
+    `const fs = require("node:fs/promises");
+const path = require("node:path");
+
+module.exports = async function attachments(test, kind, error, context) {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const name = [kind, context.attemptNumber].join("-");
+  const file = path.join(context.projectRoot, "artifacts", name + ".html");
+
+  await fs.writeFile(file, "<html>", "utf8");
+
+  return { screenshot: { html: file } };
+};\n`,
+    "utf8",
+  );
+
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hook,
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  emitFlakyRetry(runner, retried);
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("test end", failing);
+  // Cypress reports a skipped test before it would have started it.
+  runner.emit("pending", pending);
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  const byName = Object.fromEntries(
+    readJson(path.join(projectRoot, outputFile)).tests.map((result) => [
+      result.name,
+      result,
+    ]),
+  );
+  const hookHtml = (attempt) =>
+    path.basename(attempt.meta.screenshot.html, ".html");
+
+  assert.equal(hookHtml(byName.retried.pastAttempts[0]), "failed-1");
+  assert.equal(hookHtml(byName.retried.attempt), "successful-2");
+  assert.equal(hookHtml(byName.failing.attempt), "failed-1");
+  assert.equal(hookHtml(byName.pending.attempt), "skipped-1");
+});
+
+test("writes the results inline when the hook is synchronous", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const passing = createMochaTest({
+    titlePath: ["passes"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook.js"),
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+  let calledBack = false;
+
+  runner.emit("test", passing);
+  runner.emit("pass", passing);
+  runner.emit("end");
+
+  assert.ok(fs.existsSync(path.join(projectRoot, outputFile)));
+
+  reporter.done(0, () => {
+    calledBack = true;
+  });
+
+  assert.equal(calledBack, true, "done deferred with nothing to wait for");
+});
+
+test("contains an async hook that rejects", async (t) => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-rejecting.js"),
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+  const warnings = captureWarnings(t);
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  assert.equal(results.tests.length, 1);
+  assert.equal(results.tests[0].attempt.status.message, "boom");
+  assert.equal(results.tests[0].attempt.meta, undefined);
+  assert.equal(
+    warnings.filter((warning) =>
+      /attachmentsHook rejected: Error: async boom/.test(warning),
+    ).length,
+    1,
+  );
+});
+
+test("bounds the wait on a hook that never settles", async (t) => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-hanging.js"),
+      attachmentsTimeout: 50,
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+  const warnings = captureWarnings(t);
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  assert.equal(results.tests.length, 1);
+  assert.equal(results.tests[0].attempt.meta, undefined);
+  assert.equal(
+    warnings.filter((warning) =>
+      /attachmentsHook did not finish within 50ms/.test(warning),
+    ).length,
+    1,
+  );
+});
+
+test("drops attachments from a hook that settles after the write", async (t) => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-slow.js"),
+      attachmentsTimeout: 20,
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+  const warnings = captureWarnings(t);
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  const resultsFile = path.join(projectRoot, outputFile);
+  const written = fs.readFileSync(resultsFile, "utf8");
+
+  // Long enough for the hook to settle, with the results already on disk.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  assert.equal(fs.readFileSync(resultsFile, "utf8"), written);
+  assert.equal(readJson(resultsFile).tests[0].attempt.meta, undefined);
+  assert.equal(
+    warnings.filter((warning) =>
+      /attachmentsHook finished after the results were written/.test(warning),
+    ).length,
+    1,
+  );
+});
+
+test("says so when the deferred write fails", async (t) => {
+  const projectRoot = tmpdir();
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["failing"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+
+  // "results" is a file, so creating the directory for the output cannot succeed.
+  fs.writeFileSync(path.join(projectRoot, "results"), "not a directory");
+
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hookFixture("attachments-hook-async-state.js"),
+      includeScreenshots: false,
+      outputFile: "results/rwx.json",
+      projectRoot,
+    },
+  });
+  const warnings = captureWarnings(t);
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("boom"));
+  runner.emit("end");
+
+  await finish(reporter, 1);
+
+  // Off the event there is nobody to throw at, so it must be logged rather than
+  // vanish or become an unhandled rejection.
+  assert.equal(
+    warnings.filter((warning) => /failed to write results/.test(warning)).length,
+    1,
+  );
+});
+
+test("falls back to the default wait for an unusable attachmentsTimeout", (t) => {
+  const warnings = captureWarnings(t);
+  // `true` is the trap: coercing it would make a 1ms wait.
+  const unusable = ["soon", "", 0, -1, Infinity, NaN, true, false, []];
+
+  for (const attachmentsTimeout of unusable) {
+    const reporter = new RwxReporter(new EventEmitter(), {
+      reporterOptions: { attachmentsTimeout, projectRoot: tmpdir() },
+    });
+
+    assert.equal(
+      reporter.attachmentsTimeout,
+      30000,
+      `attachmentsTimeout: ${JSON.stringify(attachmentsTimeout)}`,
+    );
+  }
+
+  // Every one of them except "", which is how an unset option arrives.
+  assert.equal(
+    warnings.filter((warning) =>
+      /attachmentsTimeout must be a positive number of milliseconds/.test(
+        warning,
+      ),
+    ).length,
+    unusable.length - 1,
+  );
+});
+
+test("accepts a usable attachmentsTimeout, including a numeric string", (t) => {
+  const warnings = captureWarnings(t);
+
+  for (const [given, expected] of [
+    [50, 50],
+    ["50", 50],
+    [1, 1],
+  ]) {
+    const reporter = new RwxReporter(new EventEmitter(), {
+      reporterOptions: {
+        attachmentsTimeout: given,
+        projectRoot: tmpdir(),
+      },
+    });
+
+    assert.equal(reporter.attachmentsTimeout, expected);
+  }
+
+  assert.deepEqual(warnings, []);
+});
+
+test("writes the results when the run ends without the final event", async () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const passing = createMochaTest({
+    titlePath: ["passes"],
+    file: "cypress/e2e/hook.cy.js",
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: { includeScreenshots: false, outputFile, projectRoot },
+  });
+
+  runner.emit("test", passing);
+  runner.emit("pass", passing);
+
+  // No `end`. Writing is the reporter's own business either way.
+  await finish(reporter);
+
+  assert.equal(readJson(path.join(projectRoot, outputFile)).tests.length, 1);
+});
+
+test("writes the results when the process ends before the hook settles", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const script = path.join(projectRoot, "run-reporter.js");
+
+  // Neither the callback nor the promise arrives; results still must not go missing.
+  fs.writeFileSync(
+    script,
+    `
+const EventEmitter = require("node:events");
+const RwxReporter = require(${JSON.stringify(path.join(__dirname, "..", "index.js"))});
+const runner = new EventEmitter();
+const failing = {
+  title: "hangs",
+  file: "cypress/e2e/hang.cy.js",
+  titlePath: () => ["hangs"],
+  fullTitle: () => "hangs",
+};
+
+new RwxReporter(runner, {
+  reporterOptions: {
+    attachmentsHook: ${JSON.stringify(hookFixture("attachments-hook-hanging.js"))},
+    attachmentsTimeout: 600000,
+    includeScreenshots: false,
+    outputFile: ${JSON.stringify(outputFile)},
+    projectRoot: ${JSON.stringify(projectRoot)},
+  },
+});
+
+runner.emit("test", failing);
+runner.emit("fail", failing, new Error("boom"));
+runner.emit("end");
+process.exit(0);
+`,
+    "utf8",
+  );
+
+  const finished = spawnSync(process.execPath, [script], { encoding: "utf8" });
+
+  assert.equal(finished.status, 0, finished.stderr);
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  assert.equal(results.tests.length, 1);
+  assert.equal(results.tests[0].attempt.status.message, "boom");
 });
 
 test("locates a record from a spec seen elsewhere in the run", () => {

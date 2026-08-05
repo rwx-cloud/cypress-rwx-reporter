@@ -764,3 +764,81 @@ test("keeps a blocked test that shares a title with one that ran", () => {
     ["successful", "skipped"],
   );
 });
+
+// A failing `before` leaves the reporter synthesising skipped attempts, and the
+// hook runs for those too.
+test("waits for an async hook on the tests a failing before stopped", async () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const hook = path.join(projectRoot, "hook.js");
+  const runner = new EventEmitter();
+  const spec = "cypress/e2e/before-hook.cy.js";
+  const root = createRootSuite(spec);
+  const suite = addSuite(root, "before fails");
+  const first = addTest(suite, "never runs");
+  const error = assertionError("expected 'before' to equal 'broken'");
+
+  addTest(suite, "also never runs");
+  fs.mkdirSync(path.join(projectRoot, "artifacts"), { recursive: true });
+  fs.writeFileSync(
+    hook,
+    `const fs = require("node:fs/promises");
+const path = require("node:path");
+
+module.exports = async function attachments(test, kind, error, context) {
+  const slug = test.fullTitle().replace(/[^a-z0-9]+/gi, "-");
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const file = path.join(context.projectRoot, "artifacts", kind + "-" + slug + ".html");
+
+  await fs.writeFile(file, "<html>", "utf8");
+
+  return { screenshot: { html: file } };
+};\n`,
+    "utf8",
+  );
+
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: {
+      attachmentsHook: hook,
+      includeScreenshots: false,
+      outputFile,
+      projectRoot,
+    },
+  });
+
+  runner.emit("suite", root);
+  runner.emit("suite", suite);
+  runner.emit(
+    "fail",
+    createHookFailure(suite, "before all", "never runs", error),
+    error,
+  );
+  runner.emit("suite end", suite);
+  runner.emit("test end", endedFromHook(first, "before all", error));
+  runner.emit("suite end", root);
+  runner.emit("end");
+
+  await new Promise((resolve) => reporter.done(0, resolve));
+
+  const results = JSON.parse(
+    fs.readFileSync(path.join(projectRoot, outputFile), "utf8"),
+  );
+
+  assert.equal(results.summary.otherErrors, 1);
+  assert.equal(results.summary.skipped, 2);
+  assert.deepEqual(names(results), [
+    "before fails also never runs",
+    "before fails never runs",
+  ]);
+  assert.deepEqual(
+    results.tests
+      .map((result) => path.basename(result.attempt.meta.screenshot.html))
+      .sort(),
+    [
+      "skipped-before-fails-also-never-runs.html",
+      "skipped-before-fails-never-runs.html",
+    ],
+  );
+});
