@@ -88,6 +88,49 @@ function attemptsOf(result) {
   return [...(result.pastAttempts || []), result.attempt];
 }
 
+function millisOf(attempt) {
+  return attempt.durationInNanoseconds / 1000000;
+}
+
+// The window the attempt ran in, as the record itself describes it.
+function spanOf(attempt) {
+  return Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt);
+}
+
+// The retried specs wait 1500ms, then 500ms, then 100ms, so every attempt costs
+// distinctly less than the one before it and no attempt's duration can pass for
+// another's. Cypress reports an attempt through a per-attempt object and only
+// afterwards copies that attempt's outcome onto the long-lived test, so reading
+// the long-lived one gave attempt 2 attempt 1's duration.
+function assertEachAttemptReportsItsOwnDuration(attempts, label) {
+  const [first, second, third] = attempts.map(millisOf);
+
+  assert.equal(attempts.length, 3);
+  assert.ok(
+    first > 1000,
+    `${label} attempt 1 took ${first}ms, expected over 1000ms`,
+  );
+  assert.ok(
+    second * 1.5 < first,
+    `${label} attempt 2 took ${second}ms, not clearly less than attempt 1's ${first}ms`,
+  );
+  assert.ok(
+    third * 1.5 < second,
+    `${label} attempt 3 took ${third}ms, not clearly less than attempt 2's ${second}ms`,
+  );
+
+  // And no attempt can have taken meaningfully longer than the window between
+  // its own timestamps, or the record contradicts itself. The slack is because
+  // the reporter's clock starts when the event reaches it, a few milliseconds
+  // after Cypress starts timing the attempt.
+  attempts.forEach((attempt, index) =>
+    assert.ok(
+      millisOf(attempt) <= spanOf(attempt) + 100,
+      `${label} attempt ${index + 1} recorded ${millisOf(attempt)}ms inside a ${spanOf(attempt)}ms window`,
+    ),
+  );
+}
+
 // Sorted: attempts can be in flight together, so finish order is not a contract.
 function readAttemptNumbers(title) {
   return fs
@@ -199,6 +242,10 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
       assert.ok(attempt.finishedAt, `attempt ${index + 1} has no finishedAt`);
     });
 
+    // The last attempt of a test that ends in failure is the one Cypress has
+    // written no duration for anywhere by the time it reports it.
+    assertEachAttemptReportsItsOwnDuration(attempts, "always fails");
+
     // Cypress writes one screenshot per attempt, numbered from its own retry
     // counter, so its filenames are the oracle for the reporter's numbering.
     assert.deepEqual(
@@ -271,6 +318,11 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
       assert.deepEqual(
         attemptsOf(result).map((attempt) => attempt.status.kind),
         ["failed", "failed", "successful"],
+      );
+
+      assertEachAttemptReportsItsOwnDuration(
+        attemptsOf(result),
+        "passes on the third attempt",
       );
 
       // Read off the live test instead, all three would say "passed".

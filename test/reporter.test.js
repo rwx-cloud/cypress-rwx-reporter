@@ -958,11 +958,32 @@ function finish(reporter, failures = 0) {
 }
 
 
+// A clock the caller advances, so an attempt's recorded window is what the test
+// says it is rather than however long the emits took.
+function fakeClock(reporter) {
+  let elapsed = 0;
+
+  reporter.now = () => new Date(Date.UTC(2026, 0, 1) + elapsed);
+
+  return { advance: (milliseconds) => (elapsed += milliseconds) };
+}
+
 // What cypress@15.18.0 does to the one live test object between attempts: it
-// writes an attempt's outcome only after emitting the event, so the live test lags
-// while the event object has the attempt's state, error, and duration. The retry
-// counter is already right on the live test.
-function emitLiveRetriedFailure(runner, failing) {
+// writes an attempt's outcome only after emitting the event, so at every event
+// the live test still describes the previous attempt while the event's own object
+// has this attempt's state, error, and duration. The retry counter is already
+// right on the live test.
+//
+// The last attempt of a test that ends in failure is the exception: Cypress
+// reports it with an object that has not caught up either, and the duration only
+// appears — on the live test — by `test end`.
+//
+// `durations` are what Cypress reports each attempt cost; `windows` how long the
+// reporter's own clock says each attempt was in flight, which is longer.
+function emitLiveRetriedFailure(runner, failing, options = {}) {
+  const durations = options.durations || [87, 91, 95];
+  const windows = options.windows || [];
+  const elapse = (index) => options.clock?.advance(windows[index] || 0);
   const retryEvent = (state, err, duration) => ({
     ...createDegradedRetryTest({ title: failing.title }),
     currentRetry: 2,
@@ -977,20 +998,138 @@ function emitLiveRetriedFailure(runner, failing) {
   failing.state = "skipped";
 
   runner.emit("test", failing);
-  runner.emit("retry", retryEvent("failed", firstFailure, 87), firstFailure);
+  elapse(0);
+  runner.emit(
+    "retry",
+    retryEvent("failed", firstFailure, durations[0]),
+    firstFailure,
+  );
 
   // Caught up to attempt 1, no further.
   failing._currentRetry = 1;
   failing.state = "failed";
-  failing.duration = 87;
-  runner.emit("retry", retryEvent("failed", secondFailure, 91), secondFailure);
+  failing.duration = durations[0];
+  elapse(1);
+  runner.emit(
+    "retry",
+    retryEvent("failed", secondFailure, durations[1]),
+    secondFailure,
+  );
 
+  // Caught up to attempt 2, no further.
   failing._currentRetry = 2;
+  failing.duration = durations[1];
   failing.err = thirdFailure;
-  failing.duration = 95;
-  runner.emit("fail", failing, thirdFailure);
+  elapse(2);
+  // Whole rather than degraded, but still carrying attempt 2's duration.
+  runner.emit("fail", { ...failing }, thirdFailure);
+
+  // Only now does the last attempt's duration exist anywhere.
+  failing.duration = durations[2];
   runner.emit("test end", failing);
 }
+
+test("gives every attempt its own duration, not the previous attempt's", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
+  });
+
+  // Attempts costing deliberately different times, so a duration belonging to
+  // the previous attempt cannot pass for this one's.
+  emitLiveRetriedFailure(runner, failing, {
+    clock: fakeClock(reporter),
+    durations: [1500, 500, 100],
+    windows: [1515, 528, 128],
+  });
+  runner.emit("end");
+
+  const result = readJson(path.join(projectRoot, outputFile)).tests[0];
+  const attempts = attemptsOf(result);
+  const millis = (attempt) => attempt.durationInNanoseconds / 1000000;
+  const window = (attempt) =>
+    Date.parse(attempt.finishedAt) - Date.parse(attempt.startedAt);
+
+  // Cypress reports each attempt through a per-attempt object and only afterwards
+  // copies that attempt's outcome onto the long-lived test, so reading the
+  // long-lived one reported attempt 2 as having taken attempt 1's 1500ms, and
+  // attempt 3 as having taken attempt 2's 500ms.
+  assert.deepEqual(attempts.map(millis), [1500, 500, 100]);
+
+  // And the record must not contradict itself: no attempt can have taken longer
+  // than the window between its own timestamps.
+  attempts.forEach((attempt, index) =>
+    assert.ok(
+      millis(attempt) <= window(attempt),
+      `attempt ${index + 1} recorded ${millis(attempt)}ms inside a ${window(attempt)}ms window`,
+    ),
+  );
+});
+
+test("settles a duration onto the test that ended, not the one in flight", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+  const elsewhere = createMochaTest({
+    titlePath: ["retry probe", "another test"],
+    file: "cypress/e2e/retries-on.cy.js",
+    duration: 9999,
+  });
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
+  });
+  const clock = fakeClock(reporter);
+
+  runner.emit("test", failing);
+  clock.advance(40);
+  runner.emit("fail", failing, new Error("boom"));
+  // The settle reads the ending test's own duration, so an event for a test
+  // that is not the one in flight must not reach the attempt just recorded.
+  runner.emit("test end", elsewhere);
+
+  runner.emit("end");
+
+  const result = readJson(path.join(projectRoot, outputFile)).tests[0];
+
+  assert.equal(result.name, "retry probe always fails");
+  assert.equal(result.attempt.durationInNanoseconds, 40000000);
+});
+
+test("falls back to its own clock for an attempt Cypress gave no duration", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const runner = new EventEmitter();
+  const failing = createRetryProbe();
+  const reporter = new RwxReporter(runner, {
+    reporterOptions: { outputFile, projectRoot, includeScreenshots: false },
+  });
+  const clock = fakeClock(reporter);
+
+  // The degraded `retry` event carries no duration, and neither does the live
+  // test until Cypress writes the first attempt's outcome onto it.
+  runner.emit("test", failing);
+  clock.advance(40);
+  runner.emit(
+    "retry",
+    createDegradedRetryTest({ title: failing.title }),
+    new Error("first failure"),
+  );
+  clock.advance(60);
+  runner.emit("fail", failing, new Error("second failure"));
+  runner.emit("test end", failing);
+  runner.emit("end");
+
+  const result = readJson(path.join(projectRoot, outputFile)).tests[0];
+
+  assert.deepEqual(
+    attemptsOf(result).map((attempt) => attempt.durationInNanoseconds),
+    [40000000, 60000000],
+  );
+});
 
 test("waits for an async hook and hands it the attempt it was invoked for", async () => {
   const projectRoot = tmpdir();
