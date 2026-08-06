@@ -16,6 +16,11 @@ const hooksProjectRoot = path.join(
   "fixtures",
   "cypress-hooks-project",
 );
+const notrashProjectRoot = path.join(
+  __dirname,
+  "fixtures",
+  "cypress-notrash-project",
+);
 
 // Everything a fixture run writes. Not every project produces all of them, and
 // `force` makes removing one that was never created a no-op.
@@ -217,7 +222,7 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
   });
 
   assert.equal(run.totalPassed, 5);
-  assert.equal(run.totalFailed, 4);
+  assert.equal(run.totalFailed, 5);
   assert.equal(run.totalPending, 5);
 
   await t.test("a failure retried to exhaustion stays one record", () => {
@@ -274,6 +279,43 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
     assert.deepEqual(
       logged.map((entry) => entry.currentRetry),
       [0, 1, 2],
+    );
+  });
+
+  await t.test("a truncated title keeps its attempts on their own images", () => {
+    const results = readResults(retriesProjectRoot, "long-title.cy.js");
+    const attempts = attemptsOf(results.tests[0]);
+    const onDisk = fs.readdirSync(
+      path.join(
+        retriesProjectRoot,
+        "cypress",
+        "screenshots",
+        "long-title.cy.js",
+      ),
+    );
+    const attached = attempts.map((attempt) =>
+      path.basename(attempt.meta.screenshot.image),
+    );
+    const collisionOf = (file) => (/ \((\d+)\)\.png$/.exec(file) || [, "0"])[1];
+
+    assert.equal(attempts.length, 3);
+    // The ` (attempt N)` suffix is past Cypress's filename limit, so all three
+    // attempts truncate to one base name and Cypress separates them by
+    // collision number instead — the only thing left to tell them apart.
+    assert.equal(onDisk.length, 3);
+    assert.deepEqual(onDisk.map(collisionOf).sort(), ["0", "1", "2"]);
+
+    // Each attempt takes the collision Cypress wrote for it. Attempt 3 used to
+    // take attempt 2's: discovery returned the lowest collision rather than
+    // this attempt's, so everything past the second resolved to ` (1)`.
+    assert.deepEqual(attached.map(collisionOf), ["0", "1", "2"]);
+    // Which also means no two attempts share an image, and none is orphaned.
+    assert.deepEqual([...attached].sort(), [...onDisk].sort());
+    attempts.forEach((attempt) =>
+      assert.ok(
+        fs.existsSync(attempt.meta.screenshot.image),
+        `missing ${attempt.meta.screenshot.image}`,
+      ),
     );
   });
 
@@ -415,6 +457,91 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
       ["successful", "failed"],
     );
   });
+});
+
+// What a Captain retry looks like to the reporter: a second Cypress process over
+// the same spec, with `trashAssetsBeforeRuns` off so the first process's
+// screenshot is still on disk under the name the second one would have used.
+test("attaches each invocation's own screenshot when assets are not trashed", async (t) => {
+  cleanOutputs(notrashProjectRoot);
+  t.after(() => cleanOutputs(notrashProjectRoot));
+
+  const screenshotsDirectory = path.join(
+    notrashProjectRoot,
+    "cypress",
+    "screenshots",
+    "notrash.cy.js",
+  );
+  const screenshotsOnDisk = () =>
+    fs.existsSync(screenshotsDirectory)
+      ? fs
+          .readdirSync(screenshotsDirectory)
+          .map((file) => path.join(screenshotsDirectory, file))
+          .sort()
+      : [];
+
+  const invoke = async () => {
+    // Only the results are cleared between invocations; the screenshots are what
+    // this test is about, and Captain's retry does not clear them either.
+    fs.rmSync(path.join(notrashProjectRoot, "rwx-results"), {
+      force: true,
+      recursive: true,
+    });
+
+    const run = await cypress.run({
+      browser: "electron",
+      configFile: path.join(notrashProjectRoot, "cypress.config.js"),
+      project: notrashProjectRoot,
+      quiet: true,
+    });
+
+    assert.equal(run.totalFailed, 1);
+
+    const results = readResults(notrashProjectRoot);
+    const attempts = attemptsOf(results.tests[0]);
+
+    assert.equal(results.summary.tests, 1);
+    assert.equal(results.summary.failed, 1);
+    assert.equal(attempts.length, 1);
+
+    return { attempts, screenshots: screenshotsOnDisk() };
+  };
+
+  const first = await invoke();
+  const second = await invoke();
+
+  // Cypress keeps the first screenshot and writes the second under a
+  // collision-suffixed name rather than overwriting it.
+  assert.equal(first.screenshots.length, 1);
+  assert.equal(second.screenshots.length, 2);
+  assert.deepEqual(
+    second.screenshots.map((file) => path.basename(file)),
+    [
+      "without trashing -- fails with a screenshot (failed) (1).png",
+      "without trashing -- fails with a screenshot (failed).png",
+    ],
+  );
+
+  const attached = (invocation) =>
+    invocation.attempts.map((attempt) => attempt.meta.screenshot.image);
+
+  assert.deepEqual(attached(first), first.screenshots);
+  // The second invocation's attempt gets the file the second invocation wrote,
+  // not the one the first left behind.
+  assert.deepEqual(
+    attached(second),
+    second.screenshots.filter((file) => !first.screenshots.includes(file)),
+  );
+
+  // The same no-orphans invariant the hooks project asserts: between them the two
+  // invocations account for every screenshot Cypress wrote.
+  assert.deepEqual(
+    second.screenshots.filter(
+      (file) => ![...attached(first), ...attached(second)].includes(file),
+    ),
+    [],
+    "a screenshot Cypress wrote is attached to nothing",
+  );
 });
 
 // A hook failure is not a test, and the tests it stopped from running are not
