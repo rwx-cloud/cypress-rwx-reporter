@@ -222,7 +222,7 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
   });
 
   assert.equal(run.totalPassed, 5);
-  assert.equal(run.totalFailed, 4);
+  assert.equal(run.totalFailed, 5);
   assert.equal(run.totalPending, 5);
 
   await t.test("a failure retried to exhaustion stays one record", () => {
@@ -279,6 +279,43 @@ test("reports Cypress retries faithfully across spec shapes", async (t) => {
     assert.deepEqual(
       logged.map((entry) => entry.currentRetry),
       [0, 1, 2],
+    );
+  });
+
+  await t.test("a truncated title keeps its attempts on their own images", () => {
+    const results = readResults(retriesProjectRoot, "long-title.cy.js");
+    const attempts = attemptsOf(results.tests[0]);
+    const onDisk = fs.readdirSync(
+      path.join(
+        retriesProjectRoot,
+        "cypress",
+        "screenshots",
+        "long-title.cy.js",
+      ),
+    );
+    const attached = attempts.map((attempt) =>
+      path.basename(attempt.meta.screenshot.image),
+    );
+    const collisionOf = (file) => (/ \((\d+)\)\.png$/.exec(file) || [, "0"])[1];
+
+    assert.equal(attempts.length, 3);
+    // The ` (attempt N)` suffix is past Cypress's filename limit, so all three
+    // attempts truncate to one base name and Cypress separates them by
+    // collision number instead — the only thing left to tell them apart.
+    assert.equal(onDisk.length, 3);
+    assert.deepEqual(onDisk.map(collisionOf).sort(), ["0", "1", "2"]);
+
+    // Each attempt takes the collision Cypress wrote for it. Attempt 3 used to
+    // take attempt 2's: discovery returned the lowest collision rather than
+    // this attempt's, so everything past the second resolved to ` (1)`.
+    assert.deepEqual(attached.map(collisionOf), ["0", "1", "2"]);
+    // Which also means no two attempts share an image, and none is orphaned.
+    assert.deepEqual([...attached].sort(), [...onDisk].sort());
+    attempts.forEach((attempt) =>
+      assert.ok(
+        fs.existsSync(attempt.meta.screenshot.image),
+        `missing ${attempt.meta.screenshot.image}`,
+      ),
     );
   });
 

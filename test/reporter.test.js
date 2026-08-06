@@ -313,6 +313,43 @@ test("keeps truncated attempt 1 off the retry's screenshot", () => {
   );
 });
 
+test("walks the collision numbers for every truncated attempt", () => {
+  const projectRoot = tmpdir();
+  const longTitle = "a".repeat(300);
+  const directory = path.join(projectRoot, "cypress/screenshots/long.cy.js");
+  // What cypress@15.18.0 writes for three attempts of a title this long: the
+  // ` (attempt N)` suffix falls off the end, so every attempt collides with the
+  // one before it and Cypress takes the next free collision number.
+  const screenshotPaths = [
+    path.join(directory, `${"a".repeat(250)}.png`),
+    path.join(directory, `${"a".repeat(246)} (1).png`),
+    path.join(directory, `${"a".repeat(246)} (2).png`),
+  ];
+  const failing = createMochaTest({
+    titlePath: [longTitle],
+    file: "cypress/e2e/long.cy.js",
+  });
+
+  fs.mkdirSync(directory, { recursive: true });
+  screenshotPaths.forEach((file) => fs.writeFileSync(file, "png"));
+
+  // Attempt 3 used to take attempt 2's image: the scan returned the lowest
+  // collision number rather than this attempt's, so every attempt past the
+  // second resolved to ` (1)`.
+  assert.deepEqual(
+    [1, 2, 3].map((attemptNumber) =>
+      RwxReporter.findFailureScreenshot(
+        failing,
+        attemptNumber,
+        {},
+        projectRoot,
+        Date.now(),
+      ),
+    ),
+    screenshotPaths,
+  );
+});
+
 
 test("skips a screenshot a previous invocation left under the un-suffixed name", () => {
   const projectRoot = tmpdir();
