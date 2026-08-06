@@ -264,6 +264,171 @@ test("prefers Cypress collision filenames for truncated retry screenshots", () =
   );
 });
 
+// A previous Cypress invocation's screenshot is seconds old at least by the time
+// a Captain retry writes its own, so a gap this size is well past anything the
+// tolerance for clock skew would forgive.
+function backdate(file, secondsAgo = 60) {
+  const when = new Date(Date.now() - secondsAgo * 1000);
+
+  fs.utimesSync(file, when, when);
+}
+
+test("keeps truncated attempt 1 off the retry's screenshot", () => {
+  const projectRoot = tmpdir();
+  const longTitle = "a".repeat(300);
+  const firstScreenshotPath = path.join(
+    projectRoot,
+    "cypress/screenshots/long.cy.js",
+    `${"a".repeat(250)}.png`,
+  );
+  const retryScreenshotPath = path.join(
+    projectRoot,
+    "cypress/screenshots/long.cy.js",
+    `${"a".repeat(246)} (1).png`,
+  );
+  const failing = createMochaTest({
+    titlePath: [longTitle],
+    file: "cypress/e2e/long.cy.js",
+  });
+
+  fs.mkdirSync(path.dirname(firstScreenshotPath), { recursive: true });
+  fs.writeFileSync(firstScreenshotPath, "png");
+  fs.writeFileSync(retryScreenshotPath, "png");
+  // Both belong to this invocation, and the retry's is the newer of the two.
+  backdate(firstScreenshotPath, 2);
+
+  // The mirror of the test above, and the reason screenshots are discovered by
+  // filtering on modification time rather than ranking by it: ranking would give
+  // attempt 1 the retry's image, because within one invocation "newest" only
+  // ever means "the last attempt". The name is what tells these two apart.
+  assert.equal(
+    RwxReporter.findFailureScreenshot(
+      failing,
+      1,
+      {},
+      projectRoot,
+      new Date(Date.now() - 10000),
+    ),
+    firstScreenshotPath,
+  );
+});
+
+
+test("skips a screenshot a previous invocation left under the un-suffixed name", () => {
+  const projectRoot = tmpdir();
+  const directory = path.join(projectRoot, "cypress/screenshots/notrash.cy.js");
+  const previous = path.join(directory, "notrash -- fails (failed).png");
+  const current = path.join(directory, "notrash -- fails (failed) (1).png");
+  const failing = createMochaTest({
+    titlePath: ["notrash", "fails"],
+    file: "cypress/e2e/notrash.cy.js",
+  });
+
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(previous, "png");
+  fs.writeFileSync(current, "png");
+  backdate(previous);
+
+  // With `trashAssetsBeforeRuns` off the un-suffixed name is the previous
+  // invocation's, and this invocation's attempt 1 is the collision-suffixed one.
+  assert.equal(
+    RwxReporter.findFailureScreenshot(failing, 1, {}, projectRoot, Date.now()),
+    current,
+  );
+  // Told nothing about when the invocation started, there is nothing to tell the
+  // two apart.
+  assert.equal(
+    RwxReporter.findFailureScreenshot(failing, 1, {}, projectRoot),
+    previous,
+  );
+});
+
+test("finds this invocation's screenshot past several previous invocations", () => {
+  const projectRoot = tmpdir();
+  const directory = path.join(projectRoot, "cypress/screenshots/notrash.cy.js");
+  const baseName = "notrash -- fails (failed)";
+  const failing = createMochaTest({
+    titlePath: ["notrash", "fails"],
+    file: "cypress/e2e/notrash.cy.js",
+  });
+
+  fs.mkdirSync(directory, { recursive: true });
+  [`${baseName}.png`, `${baseName} (1).png`, `${baseName} (2).png`].forEach(
+    (filename, index) => {
+      const file = path.join(directory, filename);
+
+      fs.writeFileSync(file, "png");
+
+      // Only the third invocation's is left current.
+      if (index < 2) {
+        backdate(file, 60 * (2 - index));
+      }
+    },
+  );
+
+  // Which collision number Cypress reached depends on how many invocations came
+  // before, so the number itself carries no information about whose it is.
+  assert.equal(
+    RwxReporter.findFailureScreenshot(failing, 1, {}, projectRoot, Date.now()),
+    path.join(directory, `${baseName} (2).png`),
+  );
+});
+
+test("falls back to every screenshot when none looks like this invocation's", () => {
+  const projectRoot = tmpdir();
+  const directory = path.join(projectRoot, "cypress/screenshots/stale.cy.js");
+  const screenshotPath = path.join(directory, "stale -- fails (failed).png");
+  const failing = createMochaTest({
+    titlePath: ["stale", "fails"],
+    file: "cypress/e2e/stale.cy.js",
+  });
+
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(screenshotPath, "png");
+  backdate(screenshotPath);
+
+  // A filesystem whose timestamps cannot be trusted should cost the attempt
+  // nothing more than the discrimination — never the screenshot itself.
+  assert.equal(
+    RwxReporter.findFailureScreenshot(failing, 1, {}, projectRoot, Date.now()),
+    screenshotPath,
+  );
+});
+
+test("attaches the current invocation's screenshot, not a previous one's", () => {
+  const projectRoot = tmpdir();
+  const outputFile = "results/rwx.json";
+  const directory = path.join(projectRoot, "cypress/screenshots/notrash.cy.js");
+  const previous = path.join(directory, "notrash -- fails (failed).png");
+  const current = path.join(directory, "notrash -- fails (failed) (1).png");
+  const runner = new EventEmitter();
+  const failing = createMochaTest({
+    titlePath: ["notrash", "fails"],
+    file: "cypress/e2e/notrash.cy.js",
+  });
+
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(previous, "png");
+  backdate(previous);
+
+  // Constructed with only the previous invocation's screenshot on disk, which is
+  // where a Captain retry's Cypress process starts from.
+  new RwxReporter(runner, { reporterOptions: { outputFile, projectRoot } });
+
+  fs.writeFileSync(current, "png");
+
+  runner.emit("test", failing);
+  runner.emit("fail", failing, new Error("fails again"));
+  runner.emit("test end", failing);
+  runner.emit("end");
+
+  const results = readJson(path.join(projectRoot, outputFile));
+
+  assert.deepEqual(results.tests[0].attempt.meta, {
+    screenshot: { image: current },
+  });
+});
+
 test("attaches failure screenshots to the matching attempt", () => {
   const projectRoot = tmpdir();
   const outputFile = "results/rwx.json";

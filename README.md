@@ -34,6 +34,10 @@ cypress/screenshots/<spec path>/<suite -- test> (failed).png
 cypress/screenshots/<spec path>/<suite -- test> (failed) (attempt 2).png
 ```
 
+When a spec runs more than once and [`trashAssetsBeforeRuns`](https://docs.cypress.io/app/references/configuration) is off, the screenshots folder holds screenshots from every invocation. Cypress does not overwrite the earlier one — it writes the new one alongside it as `… (failed) (1).png` — so a filename on its own no longer says which invocation produced it. This comes up when retries are driven from outside Cypress, as [Captain](https://www.rwx.com/docs/captain) does: each retry is a fresh Cypress process, on its own first attempt.
+
+The reporter resolves each attempt to a screenshot this invocation wrote, by modification time, so a retried attempt is not attached the previous invocation's image. Where those timestamps are unusable it falls back to matching on filename alone. Nothing to configure.
+
 ### Failing hooks
 
 A failing `before`, `beforeEach`, `after`, or `afterEach` hook is not a test, so it is reported in `otherErrors` rather than as one:
